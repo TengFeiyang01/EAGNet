@@ -33,6 +33,8 @@ from metrics import minFDE
 from metrics import minFHE
 from modules import QCNetDecoder
 from modules import QCNetEncoder
+from modules import MaskedTrajectoryPrediction
+
 
 try:
     from av2.datasets.motion_forecasting.eval.submission import ChallengeSubmission
@@ -152,20 +154,24 @@ class QCNet(pl.LightningModule):
         self.MR = MR(max_guesses=6)
 
         self.test_predictions = dict()
+        self.self_supervised_task = MaskedTrajectoryPrediction(self.encoder, self.decoder)
+        self.ssl_weight = kwargs.get('ssl_weight', 0.1)  # 自监督损失权重
+
 
     def forward(self, data: HeteroData):
         scene_enc = self.encoder(data)
         pred = self.decoder(data, scene_enc)
         return pred
 
-    def training_step(self,
-                      data,
-                      batch_idx):
+    def training_step(self, data, batch_idx):
         if isinstance(data, Batch):
             data['agent']['av_index'] += data['agent']['ptr'][:-1]
+
+        # Supervised losses
         reg_mask = data['agent']['predict_mask'][:, self.num_historical_steps:]
         cls_mask = data['agent']['predict_mask'][:, -1]
         pred = self(data)
+
         if self.output_head:
             traj_propose = torch.cat([pred['loc_propose_pos'][..., :self.output_dim],
                                       pred['loc_propose_head'],
@@ -180,31 +186,59 @@ class QCNet(pl.LightningModule):
                                       pred['scale_propose_pos'][..., :self.output_dim]], dim=-1)
             traj_refine = torch.cat([pred['loc_refine_pos'][..., :self.output_dim],
                                      pred['scale_refine_pos'][..., :self.output_dim]], dim=-1)
+
         pi = pred['pi']
-        gt = torch.cat([data['agent']['target'][..., :self.output_dim], data['agent']['target'][..., -1:]], dim=-1)
+        gt = torch.cat([data['agent']['target'][..., :self.output_dim],
+                        data['agent']['target'][..., -1:]], dim=-1)
+
         l2_norm = (torch.norm(traj_propose[..., :self.output_dim] -
                               gt[..., :self.output_dim].unsqueeze(1), p=2, dim=-1) * reg_mask.unsqueeze(1)).sum(dim=-1)
         best_mode = l2_norm.argmin(dim=-1)
+
         traj_propose_best = traj_propose[torch.arange(traj_propose.size(0)), best_mode]
         traj_refine_best = traj_refine[torch.arange(traj_refine.size(0)), best_mode]
+
         reg_loss_propose = self.reg_loss(traj_propose_best,
                                          gt[..., :self.output_dim + self.output_head]).sum(dim=-1) * reg_mask
         reg_loss_propose = reg_loss_propose.sum(dim=0) / reg_mask.sum(dim=0).clamp_(min=1)
         reg_loss_propose = reg_loss_propose.mean()
+
         reg_loss_refine = self.reg_loss(traj_refine_best,
                                         gt[..., :self.output_dim + self.output_head]).sum(dim=-1) * reg_mask
         reg_loss_refine = reg_loss_refine.sum(dim=0) / reg_mask.sum(dim=0).clamp_(min=1)
         reg_loss_refine = reg_loss_refine.mean()
+
         cls_loss = self.cls_loss(pred=traj_refine[:, :, -1:].detach(),
                                  target=gt[:, -1:, :self.output_dim + self.output_head],
                                  prob=pi,
                                  mask=reg_mask[:, -1:]) * cls_mask
         cls_loss = cls_loss.sum() / cls_mask.sum().clamp_(min=1)
+
+        supervised_loss = reg_loss_propose + reg_loss_refine + cls_loss
+
+        # --- 新增自监督损失 ---
+        trajectory = data['agent']['trajectory']
+        mask = self.generate_random_mask(trajectory)
+
+        ssl_loss = self.self_supervised_task(trajectory, mask)
+        self.log('train_ssl_loss', ssl_loss, prog_bar=True, batch_size=1)
+
+        # 最终的总损失（加入自监督损失）
+        total_loss = supervised_loss + self.ssl_weight * ssl_loss
+
+        # 日志记录
         self.log('train_reg_loss_propose', reg_loss_propose, prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
         self.log('train_reg_loss_refine', reg_loss_refine, prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
         self.log('train_cls_loss', cls_loss, prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
-        loss = reg_loss_propose + reg_loss_refine + cls_loss
-        return loss
+        self.log('train_total_loss', total_loss, prog_bar=True, batch_size=1)
+
+        return total_loss
+
+
+    def generate_random_mask(self, trajectory, mask_ratio=0.15):
+        mask = torch.rand_like(trajectory[..., 0]) < mask_ratio
+        return mask.unsqueeze(-1).expand_as(trajectory)
+
 
     def validation_step(self,
                         data,
