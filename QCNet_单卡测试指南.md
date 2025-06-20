@@ -563,11 +563,327 @@ python debug_test.py
    - 查看控制台输出
    - 检查生成的日志文件
 
+## 📊 可视化功能
+
+### 11.1 创建可视化脚本
+
+创建文件 `visualize_predictions.py`：
+
+```python
+# visualize_predictions.py
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import pandas as pd
+from pathlib import Path
+import seaborn as sns
+from torch_geometric.data import DataLoader
+from datasets import ArgoverseV2Dataset
+from predictors import QCNet
+from transforms import TargetBuilder
+
+class QCNetVisualizer:
+    def __init__(self, model_path, data_root, device='cuda:0'):
+        self.device = device
+        self.model = QCNet.load_from_checkpoint(model_path, map_location=device)
+        self.model.eval()
+        
+        # 创建数据集
+        self.dataset = ArgoverseV2Dataset(
+            root=data_root, 
+            split='val',
+            transform=TargetBuilder(self.model.num_historical_steps, self.model.num_future_steps)
+        )
+        
+        # 设置matplotlib中文字体
+        plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+        plt.rcParams['axes.unicode_minus'] = False
+        
+    def visualize_single_prediction(self, idx=0, save_path=None):
+        """可视化单个预测结果"""
+        data = self.dataset[idx]
+        
+        with torch.no_grad():
+            # 转换为batch格式
+            data = data.to(self.device)
+            pred = self.model(data.unsqueeze(0))
+        
+        # 提取数据
+        hist_pos = data['agent']['position'][:self.model.num_historical_steps].cpu().numpy()
+        future_pos = data['agent']['target'][:self.model.num_future_steps].cpu().numpy()
+        
+        # 预测结果
+        pred_pos = pred['loc_refine_pos'][0].cpu().numpy()  # [num_modes, num_future_steps, 2]
+        probs = torch.softmax(pred['pi'][0], dim=-1).cpu().numpy()
+        
+        # 创建图形
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        
+        # 左图：轨迹预测
+        ax1.plot(hist_pos[:, 0], hist_pos[:, 1], 'b-o', linewidth=2, markersize=4, label='历史轨迹')
+        ax1.plot(future_pos[:, 0], future_pos[:, 1], 'g-o', linewidth=2, markersize=4, label='真实未来轨迹')
+        
+        # 绘制多模态预测
+        colors = plt.cm.Set3(np.linspace(0, 1, len(pred_pos)))
+        for i, (traj, prob) in enumerate(zip(pred_pos, probs)):
+            ax1.plot(traj[:, 0], traj[:, 1], '--', color=colors[i], 
+                    linewidth=2, alpha=0.8, label=f'预测模式{i+1} (概率: {prob:.2f})')
+        
+        ax1.set_xlabel('X 坐标 (m)')
+        ax1.set_ylabel('Y 坐标 (m)')
+        ax1.set_title('QCNet 轨迹预测结果')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.axis('equal')
+        
+        # 右图：概率分布
+        ax2.bar(range(len(probs)), probs, color=colors)
+        ax2.set_xlabel('预测模式')
+        ax2.set_ylabel('概率')
+        ax2.set_title('预测模式概率分布')
+        ax2.set_xticks(range(len(probs)))
+        ax2.set_xticklabels([f'模式{i+1}' for i in range(len(probs))])
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"图片已保存到: {save_path}")
+        
+        plt.show()
+        
+    def visualize_training_metrics(self, log_dir='lightning_logs'):
+        """可视化训练指标"""
+        # 查找最新的version目录
+        log_path = Path(log_dir)
+        if not log_path.exists():
+            print("未找到训练日志目录")
+            return
+            
+        version_dirs = [d for d in log_path.iterdir() if d.is_dir() and d.name.startswith('version_')]
+        if not version_dirs:
+            print("未找到训练日志")
+            return
+            
+        latest_version = max(version_dirs, key=lambda x: int(x.name.split('_')[1]))
+        
+        # 读取metrics.csv
+        metrics_file = latest_version / 'metrics.csv'
+        if not metrics_file.exists():
+            print("未找到metrics.csv文件")
+            return
+            
+        df = pd.read_csv(metrics_file)
+        
+        # 创建训练曲线图
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        
+        # 损失曲线
+        train_loss = df[df['train_total_loss'].notna()]
+        val_loss = df[df['val_minFDE'].notna()]
+        
+        if not train_loss.empty:
+            axes[0, 0].plot(train_loss['step'], train_loss['train_total_loss'], label='训练损失')
+            axes[0, 0].set_title('训练损失曲线')
+            axes[0, 0].set_xlabel('步数')
+            axes[0, 0].set_ylabel('损失值')
+            axes[0, 0].legend()
+            axes[0, 0].grid(True, alpha=0.3)
+        
+        # 验证指标
+        if not val_loss.empty:
+            axes[0, 1].plot(val_loss['epoch'], val_loss['val_minFDE'], 'r-', label='minFDE')
+            axes[0, 1].set_title('验证指标 - minFDE')
+            axes[0, 1].set_xlabel('Epoch')
+            axes[0, 1].set_ylabel('minFDE')
+            axes[0, 1].legend()
+            axes[0, 1].grid(True, alpha=0.3)
+        
+        # 其他指标
+        if 'val_minADE' in df.columns:
+            val_ade = df[df['val_minADE'].notna()]
+            if not val_ade.empty:
+                axes[1, 0].plot(val_ade['epoch'], val_ade['val_minADE'], 'g-', label='minADE')
+                axes[1, 0].set_title('验证指标 - minADE')
+                axes[1, 0].set_xlabel('Epoch')
+                axes[1, 0].set_ylabel('minADE')
+                axes[1, 0].legend()
+                axes[1, 0].grid(True, alpha=0.3)
+        
+        if 'val_MR' in df.columns:
+            val_mr = df[df['val_MR'].notna()]
+            if not val_mr.empty:
+                axes[1, 1].plot(val_mr['epoch'], val_mr['val_MR'], 'm-', label='Miss Rate')
+                axes[1, 1].set_title('验证指标 - Miss Rate')
+                axes[1, 1].set_xlabel('Epoch')
+                axes[1, 1].set_ylabel('Miss Rate')
+                axes[1, 1].legend()
+                axes[1, 1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig('training_metrics.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        print("训练指标图已保存为 training_metrics.png")
+
+# 使用示例
+if __name__ == "__main__":
+    # 使用预训练模型（如果有的话）
+    model_path = "lightning_logs/version_0/checkpoints/epoch-0.ckpt"  # 替换为实际路径
+    data_root = "~/test_data/argoverse_v2/"  # 替换为实际数据路径
+    
+    if Path(model_path).exists():
+        visualizer = QCNetVisualizer(model_path, data_root)
+        
+        # 可视化预测结果
+        visualizer.visualize_single_prediction(idx=0, save_path="prediction_result.png")
+        
+        # 可视化训练指标
+        visualizer.visualize_training_metrics()
+    else:
+        print(f"模型文件不存在: {model_path}")
+        print("请先运行训练脚本生成模型文件")
+```
+
+### 11.2 实时可视化脚本
+
+创建文件 `real_time_visualizer.py`：
+
+```python
+# real_time_visualizer.py
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.animation import FuncAnimation
+import torch
+from datasets import ArgoverseV2Dataset
+from predictors import QCNet
+
+class RealTimeVisualizer:
+    def __init__(self, model_path, data_root):
+        self.model = QCNet.load_from_checkpoint(model_path)
+        self.model.eval()
+        self.dataset = ArgoverseV2Dataset(root=data_root, split='val')
+        
+        # 初始化图形
+        self.fig, self.ax = plt.subplots(figsize=(10, 8))
+        self.ax.set_xlim(-50, 50)
+        self.ax.set_ylim(-50, 50)
+        self.ax.set_xlabel('X (m)')
+        self.ax.set_ylabel('Y (m)')
+        self.ax.set_title('QCNet 实时预测可视化')
+        self.ax.grid(True, alpha=0.3)
+        
+    def update_plot(self, frame):
+        self.ax.clear()
+        
+        # 获取数据
+        idx = frame % len(self.dataset)
+        data = self.dataset[idx]
+        
+        with torch.no_grad():
+            pred = self.model(data.unsqueeze(0))
+        
+        # 绘制结果
+        hist_pos = data['agent']['position'][:self.model.num_historical_steps].numpy()
+        self.ax.plot(hist_pos[:, 0], hist_pos[:, 1], 'b-o', label='历史轨迹')
+        
+        # 绘制预测
+        pred_pos = pred['loc_refine_pos'][0].numpy()
+        colors = plt.cm.Set3(np.arange(len(pred_pos)))
+        
+        for i, traj in enumerate(pred_pos):
+            self.ax.plot(traj[:, 0], traj[:, 1], '--', color=colors[i], 
+                        label=f'预测{i+1}')
+        
+        self.ax.set_xlim(-50, 50)
+        self.ax.set_ylim(-50, 50)
+        self.ax.legend()
+        self.ax.set_title(f'样本 {idx}: QCNet 实时预测')
+        
+    def start(self):
+        anim = FuncAnimation(self.fig, self.update_plot, interval=2000, cache_frame_data=False)
+        plt.show()
+        return anim
+
+# 使用方法
+if __name__ == "__main__":
+    visualizer = RealTimeVisualizer("path/to/model.ckpt", "path/to/data")
+    visualizer.start()
+```
+
+### 11.3 高级多场景可视化（类似你的图片）
+
+创建并运行 `advanced_visualizer.py`（已创建），实现专业级可视化：
+
+```bash
+# 安装可视化依赖
+pip install matplotlib seaborn
+
+# 运行高级多场景可视化（类似你的图片效果）
+python advanced_visualizer.py
+
+# 运行基础可视化
+python visualize_predictions.py
+
+# 实时可视化（如果有训练好的模型）
+python real_time_visualizer.py
+```
+
+### 11.4 快速可视化命令
+
+### 11.4 训练过程中的可视化
+
+在 `debug_test.py` 中添加TensorBoard日志：
+
+```python
+# 在debug_test.py中修改trainer配置
+from pytorch_lightning.loggers import TensorBoardLogger
+
+logger = TensorBoardLogger("tb_logs", name="qcnet_test")
+
+trainer = pl.Trainer(
+    accelerator='gpu',
+    devices=1,
+    max_epochs=1,
+    logger=logger,  # 添加logger
+    # ... 其他参数
+)
+
+# 训练后启动TensorBoard
+# tensorboard --logdir=tb_logs
+```
+
+### 11.5 可视化结果示例
+
+运行可视化脚本后，你会看到：
+
+1. **轨迹预测图**：
+   - 蓝色线：历史轨迹
+   - 绿色线：真实未来轨迹  
+   - 彩色虚线：多模态预测结果
+
+2. **概率分布图**：
+   - 显示每个预测模式的概率
+
+3. **训练曲线**：
+   - 损失下降情况
+   - 验证指标变化
+
+4. **实时预测**：
+   - 动态显示不同样本的预测结果
+
+5. **高级多场景可视化**（类似你提供的图片）：
+   - 黑色背景的专业可视化界面
+   - 多场景并排显示
+   - 道路网络和车道线渲染
+   - 橙色高亮区域标注
+   - 交互式场景切换
+
 ## 💡 小贴士
 
 - **内存不够**：逐步减少参数，从batch_size开始
 - **速度优化**：设置`num_workers=0`避免多进程开销  
 - **调试模式**：使用`fast_dev_run=True`只跑一个batch
 - **日志查看**：每次测试都会生成带时间戳的日志文件
+- **可视化调试**：使用可视化功能直观查看模型预测效果
 
 这个指南应该能帮你快速验证修改是否有问题！🎉 
