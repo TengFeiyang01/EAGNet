@@ -21,6 +21,7 @@ from torch_geometric.data import HeteroData, Batch
 from torch_geometric.utils import dense_to_sparse, subgraph
 
 from layers.attention_layer import AttentionLayer
+from layers.edge_attention_layer import EdgeAttentionLayer
 from layers.fourier_embedding import FourierEmbedding
 from utils import angle_between_2d_vectors, weight_init, wrap_angle
 
@@ -33,17 +34,23 @@ def compute_scene_complexity(agents_positions, obstacles_positions):
     :param obstacles_positions: 静态障碍物的位置，形状为 (num_obstacles, 2)
     :return: 计算得到的场景复杂度
     """
+    # 确保输入是torch tensor
+    if isinstance(agents_positions, np.ndarray):
+        agents_positions = torch.from_numpy(agents_positions)
+    if isinstance(obstacles_positions, np.ndarray):
+        obstacles_positions = torch.from_numpy(obstacles_positions)
+    
     # 计算智能体之间的平均距离
-    agent_distances = np.linalg.norm(agents_positions[:, None] - agents_positions, axis=-1)
-    avg_agent_distance = np.mean(agent_distances[agent_distances > 0])
+    agent_distances = torch.norm(agents_positions[:, None] - agents_positions, dim=-1)
+    avg_agent_distance = torch.mean(agent_distances[agent_distances > 0])
 
     # 计算障碍物与智能体的平均距离
-    obstacle_distances = np.linalg.norm(agents_positions[:, None] - obstacles_positions, axis=-1)
-    avg_obstacle_distance = np.mean(obstacle_distances)
+    obstacle_distances = torch.norm(agents_positions[:, None] - obstacles_positions, dim=-1)
+    avg_obstacle_distance = torch.mean(obstacle_distances)
 
     # 简单的复杂度评估：智能体的密集程度 + 障碍物的密集程度
     complexity = avg_agent_distance + avg_obstacle_distance
-    return complexity
+    return complexity.item()  # 返回python标量
 
 
 # 定义位置编码类
@@ -73,10 +80,10 @@ class PositionEncoding(nn.Module):
         scene_complexity = compute_scene_complexity(agents_positions, obstacles_positions)
 
         # 根据场景复杂度动态调整 alpha
-        alpha = 1 / (1 + np.exp(-scene_complexity))  # 使用sigmoid来平滑调整值，保证alpha在0到1之间
+        alpha = 1 / (1 + torch.exp(torch.tensor(-scene_complexity)))  # 使用torch.exp来保持一致性
 
         # 计算位置编码
-        position_encoding = self.pe[:, :x.size(1)]  # 截取适当长度的编码
+        position_encoding = self.pe[:, :x.size(1)].to(x.device)  # 截取适当长度的编码并移到正确设备
 
         # 动态调整位置编码
         adjusted_position_encoding = position_encoding * alpha
@@ -134,9 +141,14 @@ class QCNetAgentEncoder(nn.Module):
             [AttentionLayer(hidden_dim=hidden_dim, num_heads=num_heads, head_dim=head_dim, dropout=dropout,
                             bipartite=True, has_pos_emb=True) for _ in range(num_layers)]
         )
+        # self.a2a_attn_layers = nn.ModuleList(
+        #     [AttentionLayer(hidden_dim=hidden_dim, num_heads=num_heads, head_dim=head_dim, dropout=dropout,
+        #                     bipartite=False, has_pos_emb=True) for _ in range(num_layers)]
+        # )
+        # 结合 EdgeAttentionLayer
         self.a2a_attn_layers = nn.ModuleList(
-            [AttentionLayer(hidden_dim=hidden_dim, num_heads=num_heads, head_dim=head_dim, dropout=dropout,
-                            bipartite=False, has_pos_emb=True) for _ in range(num_layers)]
+            [EdgeAttentionLayer(hidden_dim=hidden_dim, edge_dim=input_dim_r_a2a, num_heads=num_heads, dropout=dropout)
+             for _ in range(num_layers)]
         )
         self.apply(weight_init)
 
@@ -170,6 +182,25 @@ class QCNetAgentEncoder(nn.Module):
             raise ValueError('{} is not a valid dataset'.format(self.dataset))
         x_a = self.x_a_emb(continuous_inputs=x_a.view(-1, x_a.size(-1)), categorical_embs=categorical_embs)
         x_a = x_a.view(-1, self.num_historical_steps, self.hidden_dim)
+
+        # 应用动态位置编码
+        # 获取当前智能体位置和地图多边形作为"障碍物"
+        current_agent_pos = pos_a[:, -1, :2]  # 使用最后一个时间步的位置
+        map_polygon_pos = pos_pl[:, :2]  # 地图多边形位置
+        
+        # 对每个智能体的时间序列特征应用位置编码
+        for agent_idx in range(x_a.size(0)):
+            agent_features = x_a[agent_idx:agent_idx+1]  # (1, num_historical_steps, hidden_dim)
+            # 使用当前智能体和其他智能体的位置来计算场景复杂度
+            other_agents_pos = torch.cat([current_agent_pos[:agent_idx], current_agent_pos[agent_idx+1:]], dim=0)
+            if other_agents_pos.size(0) == 0:  # 如果只有一个智能体
+                other_agents_pos = current_agent_pos[agent_idx:agent_idx+1]
+            
+            x_a[agent_idx:agent_idx+1] = self.position_encoding(
+                agent_features, 
+                other_agents_pos, 
+                map_polygon_pos
+            )
 
         pos_t = pos_a.reshape(-1, self.input_dim)
         head_t = head_a.reshape(-1)
@@ -237,7 +268,9 @@ class QCNetAgentEncoder(nn.Module):
                                                                                                       self.hidden_dim)
             x_a = self.pl2a_attn_layers[i]((map_enc['x_pl'].transpose(0, 1).reshape(-1, self.hidden_dim), x_a), r_pl2a,
                                            edge_index_pl2a)
-            x_a = self.a2a_attn_layers[i](x_a, r_a2a, edge_index_a2a)
+            # 使用 EdgeAttentionLayer：forward(x, edge_index, edge_attr)
+            x_a = self.a2a_attn_layers[i](x_a, edge_index_a2a, r_a2a)
+
             x_a = x_a.reshape(self.num_historical_steps, -1, self.hidden_dim).transpose(0, 1)
 
         return {'x_a': x_a}
