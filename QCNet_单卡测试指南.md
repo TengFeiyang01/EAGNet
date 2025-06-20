@@ -20,21 +20,133 @@ python -c "import torch_geometric; print('PyG installed successfully')"
 
 ### 2. 数据准备
 
-#### 2.1 最小数据集准备
+#### 2.1 Argoverse 2 数据集下载
+
+**方法1: 官方完整下载（推荐用于正式使用）**
 ```bash
-# 创建测试数据目录
+# 安装Argoverse 2 API
+pip install av2
+
+# 下载数据集（需要大量存储空间和时间）
+# 训练集: ~1TB, 验证集: ~200GB, 测试集: ~200GB
+python -c "
+from av2.datasets.motion_forecasting import scenario_serialization
+import os
+
+# 创建数据目录
+os.makedirs('/path/to/argoverse_v2', exist_ok=True)
+
+# 下载验证集（相对较小，用于测试）
+scenario_serialization.download_scenarios(
+    dataset_type='val',
+    output_dir='/path/to/argoverse_v2'
+)
+"
+```
+
+**方法2: 手动下载（适合测试）**
+```bash
+# 创建数据目录
 mkdir -p /path/to/test_data/argoverse_v2
 cd /path/to/test_data/argoverse_v2
 
-# 如果你有完整数据集，可以创建软链接到少量文件
-# 或者只下载部分数据进行测试
+# 从官方下载少量样本数据用于测试
+# 访问: https://www.argoverse.org/av2.html#download-link
+# 或使用wget下载部分文件
+wget -c "https://s3.amazonaws.com/argoverse/datasets/av2/motion-forecasting/val.tar.gz"
+
+# 解压
+tar -xzf val.tar.gz
+
+# 清理压缩包
+rm val.tar.gz
 ```
 
-#### 2.2 数据验证
+**方法3: 个人用户超轻量数据集（强烈推荐！）**
+```bash
+# 创建测试数据目录
+mkdir -p /path/to/test_data/argoverse_v2/{train,val,test}
+cd /path/to/test_data/argoverse_v2
+
+# 下载单个样本文件（总共只有几MB）
+# 验证集 - 只下载2个文件用于验证
+wget -O val/sample1.parquet "https://s3.amazonaws.com/argoverse/datasets/av2/motion-forecasting/sample_scenarios/val/0000b0f9-99f9-4a1f-a231-5be9e4c523f7.parquet"
+wget -O val/sample2.parquet "https://s3.amazonaws.com/argoverse/datasets/av2/motion-forecasting/sample_scenarios/val/0000b175-3fc6-46a2-9d57-3e28e3e10140.parquet"
+
+# 训练集 - 只下载1个文件用于训练测试
+wget -O train/sample1.parquet "https://s3.amazonaws.com/argoverse/datasets/av2/motion-forecasting/sample_scenarios/train/0000b329-3351-4e99-8677-68cc4c0e9ce4.parquet"
+
+# 测试集 - 只下载1个文件用于测试
+wget -O test/sample1.parquet "https://s3.amazonaws.com/argoverse/datasets/av2/motion-forecasting/sample_scenarios/test/0000b0cd-6f82-4cba-81a7-6dc3ae5a7ea4.parquet"
+
+echo "✅ 超轻量数据集下载完成！总大小约5-10MB"
+```
+
+**方法4: 创建最小测试数据集（从完整数据集复制）**
+```bash
+# 如果你已经有完整数据集的访问权限
+mkdir -p /path/to/test_data/argoverse_v2/{train,val,test}
+
+# 从完整数据集中只复制极少量文件
+cp /path/to/full_argoverse_v2/val/*.parquet /path/to/test_data/argoverse_v2/val/ | head -2
+cp /path/to/full_argoverse_v2/train/*.parquet /path/to/test_data/argoverse_v2/train/ | head -1  
+cp /path/to/full_argoverse_v2/test/*.parquet /path/to/test_data/argoverse_v2/test/ | head -1
+```
+
+#### 2.2 数据集结构说明
+下载完成后，数据结构应如下：
+```
+argoverse_v2/
+├── train/
+│   ├── 0000b329-3351-4e99-8677-68cc4c0e9ce4.parquet
+│   ├── 0000b819-e28a-471a-bc81-09f34e6e5395.parquet
+│   └── ...
+├── val/
+│   ├── 0000b0f9-99f9-4a1f-a231-5be9e4c523f7.parquet
+│   ├── 0000b175-3fc6-46a2-9d57-3e28e3e10140.parquet  
+│   └── ...
+└── test/
+    ├── 0000b0cd-6f82-4cba-81a7-6dc3ae5a7ea4.parquet
+    ├── 0000b123-4567-8901-2345-6789abcdef01.parquet
+    └── ...
+```
+
+#### 2.3 最小数据集准备（推荐用于测试）
+```bash
+# 创建测试数据目录
+mkdir -p /path/to/test_data/argoverse_v2/{train,val,test}
+
+# 如果下载了完整验证集，只使用前几个文件进行测试
+cd /path/to/argoverse_v2/val
+ls *.parquet | head -5 | xargs -I {} cp {} /path/to/test_data/argoverse_v2/val/
+ls *.parquet | head -3 | xargs -I {} cp {} /path/to/test_data/argoverse_v2/train/
+ls *.parquet | head -2 | xargs -I {} cp {} /path/to/test_data/argoverse_v2/test/
+```
+
+#### 2.4 数据验证
 ```bash
 # 检查数据结构
 ls -la /path/to/test_data/argoverse_v2/
 # 应该包含: train/, val/, test/ 目录
+
+# 检查文件数量
+echo "Train files: $(ls /path/to/test_data/argoverse_v2/train/*.parquet 2>/dev/null | wc -l)"
+echo "Val files: $(ls /path/to/test_data/argoverse_v2/val/*.parquet 2>/dev/null | wc -l)"  
+echo "Test files: $(ls /path/to/test_data/argoverse_v2/test/*.parquet 2>/dev/null | wc -l)"
+
+# 检查单个文件（使用pandas）
+python -c "
+import pandas as pd
+import glob
+val_files = glob.glob('/path/to/test_data/argoverse_v2/val/*.parquet')
+if val_files:
+    df = pd.read_parquet(val_files[0])
+    print(f'File: {val_files[0]}')
+    print(f'Shape: {df.shape}')
+    print(f'Columns: {list(df.columns)}')
+else:
+    print('No parquet files found!')
+"
 ```
 
 ### 3. 快速功能测试
@@ -380,6 +492,53 @@ python train_qcnet.py \
 | radius | 150 | 75 | 25 |
 
 ## 🚀 快速开始
+
+### 个人用户一键开始（推荐）
+```bash
+# 1. 进入项目目录
+cd QCNet
+
+# 2. 下载超轻量数据集（只需5-10MB）
+mkdir -p ~/test_data/argoverse_v2/{train,val,test}
+cd ~/test_data/argoverse_v2
+
+# 下载样本文件
+wget -O val/sample1.parquet "https://s3.amazonaws.com/argoverse/datasets/av2/motion-forecasting/sample_scenarios/val/0000b0f9-99f9-4a1f-a231-5be9e4c523f7.parquet" &
+wget -O val/sample2.parquet "https://s3.amazonaws.com/argoverse/datasets/av2/motion-forecasting/sample_scenarios/val/0000b175-3fc6-46a2-9d57-3e28e3e10140.parquet" &
+wget -O train/sample1.parquet "https://s3.amazonaws.com/argoverse/datasets/av2/motion-forecasting/sample_scenarios/train/0000b329-3351-4e99-8677-68cc4c0e9ce4.parquet" &
+wget -O test/sample1.parquet "https://s3.amazonaws.com/argoverse/datasets/av2/motion-forecasting/sample_scenarios/test/0000b0cd-6f82-4cba-81a7-6dc3ae5a7ea4.parquet" &
+wait
+
+echo "数据下载完成！"
+cd - # 回到QCNet目录
+
+# 3. 直接测试你的修改
+python train_qcnet.py \
+  --root ~/test_data/argoverse_v2/ \
+  --train_batch_size 1 \
+  --val_batch_size 1 \
+  --test_batch_size 1 \
+  --devices 1 \
+  --dataset argoverse_v2 \
+  --num_historical_steps 10 \
+  --num_future_steps 10 \
+  --num_recurrent_steps 1 \
+  --pl2pl_radius 25 \
+  --pl2a_radius 15 \
+  --a2a_radius 15 \
+  --pl2m_radius 25 \
+  --a2m_radius 25 \
+  --hidden_dim 32 \
+  --num_modes 2 \
+  --num_map_layers 1 \
+  --num_agent_layers 1 \
+  --num_dec_layers 1 \
+  --num_heads 2 \
+  --max_epochs 1 \
+  --num_workers 0
+```
+
+### 标准流程
 
 1. **克隆项目后**：
 ```bash
