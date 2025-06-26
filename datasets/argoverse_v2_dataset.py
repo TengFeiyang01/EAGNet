@@ -1,18 +1,13 @@
-# Copyright (c) 2023, Zikang Zhou. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+
 import math
 import os
+import torch.distributed as dist
+try:
+    # Lightning 2.x
+    from pytorch_lightning.utilities.rank_zero import rank_zero_only
+except ImportError:
+    # Lightning 1.x
+    from pytorch_lightning.utilities import rank_zero_only
 import pickle
 import shutil
 import sys
@@ -30,7 +25,17 @@ from tqdm import tqdm
 
 from utils import safe_list_index
 from utils import side_to_directed_lineseg
-
+try:
+    from av2.map.lane_mark_type import LaneMarkType
+    if not hasattr(LaneMarkType, "UNKNOWN"):
+        # 创建新枚举成员 UNKNOWN
+        LaneMarkType.UNKNOWN = LaneMarkType.__new__(LaneMarkType, "UNKNOWN")
+        LaneMarkType._value2member_map_["UNKNOWN"] = LaneMarkType.UNKNOWN
+        LaneMarkType._member_map_["UNKNOWN"] = LaneMarkType.UNKNOWN
+        LaneMarkType._member_names_.append("UNKNOWN")
+except ImportError:
+    pass
+# ==============
 try:
     from av2.geometry.interpolate import compute_midpoint_line
     from av2.map.map_api import ArgoverseStaticMap
@@ -511,13 +516,26 @@ class ArgoverseV2Dataset(Dataset):
             return HeteroData(pickle.load(handle))
 
     def _download(self) -> None:
-        # if complete raw/processed files exist, skip downloading
-        if ((os.path.isdir(self.raw_dir) and len(self.raw_file_names) == len(self)) or
-                (os.path.isdir(self.processed_dir) and len(self.processed_file_names) == len(self))):
+        # 如果已经手动解压完 raw 或 processed，就不进任何下载/解压逻辑
+        if ((os.path.isdir(self.raw_dir)       and len(self.raw_file_names)       == len(self)) or
+            (os.path.isdir(self.processed_dir) and len(self.processed_file_names) == len(self))):
+            # 等待 rank0（如果是分布式）同步后再返回
+            if dist.is_initialized():
+                dist.barrier()
             return
+
+        # 只有 rank0 会进到被装饰的方法体里做真正的 download()
+        self._download_rank_zero()
+
+        # rank0 完成后，其他 rank 从 barrier 出来
+        if dist.is_initialized():
+            dist.barrier()
+
+    @rank_zero_only
+    def _download_rank_zero(self) -> None:
+        # 清空 processed 文件记录，执行原来的 download()
         self._processed_file_names = []
         self.download()
-
     def _process(self) -> None:
         # if complete processed files exist, skip processing
         if os.path.isdir(self.processed_dir) and len(self.processed_file_names) == len(self):

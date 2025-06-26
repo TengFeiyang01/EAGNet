@@ -108,6 +108,8 @@ venv.bak/
 .idea
 .vscode
 
+data/
+
 # seed project
 lightning_logs/
 .DS_Store
