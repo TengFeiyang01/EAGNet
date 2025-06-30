@@ -1,16 +1,4 @@
-# Copyright (c) 2023, Zikang Zhou. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+
 from itertools import chain
 from itertools import compress
 from pathlib import Path
@@ -33,7 +21,7 @@ from metrics import minFDE
 from metrics import minFHE
 from modules import QCNetDecoder
 from modules import QCNetEncoder
-from modules import MaskedTrajectoryPrediction
+from modules.intent_recognition import IntentRecognition
 
 
 try:
@@ -154,8 +142,16 @@ class QCNet(pl.LightningModule):
         self.MR = MR(max_guesses=6)
 
         self.test_predictions = dict()
-        self.self_supervised_task = MaskedTrajectoryPrediction(self.encoder, self.decoder)
-        self.ssl_weight = kwargs.get('ssl_weight', 0.1)  # 自监督损失权重
+        
+        # 添加意图识别模块
+        self.intent_recognition = IntentRecognition(
+            hidden_dim=hidden_dim,
+            num_intents=8
+        )
+        
+        # 意图损失权重
+        self.intent_weight = kwargs.get('intent_weight', 0.1)
+        self.consistency_weight = kwargs.get('consistency_weight', 0.05)
 
 
     def forward(self, data: HeteroData):
@@ -167,10 +163,13 @@ class QCNet(pl.LightningModule):
         if isinstance(data, Batch):
             data['agent']['av_index'] += data['agent']['ptr'][:-1]
 
+        # Forward pass - encode scene and decode predictions
+        scene_enc = self.encoder(data)
+        pred = self.decoder(data, scene_enc)
+
         # Supervised losses
         reg_mask = data['agent']['predict_mask'][:, self.num_historical_steps:]
         cls_mask = data['agent']['predict_mask'][:, -1]
-        pred = self(data)
 
         if self.output_head:
             traj_propose = torch.cat([pred['loc_propose_pos'][..., :self.output_dim],
@@ -216,29 +215,44 @@ class QCNet(pl.LightningModule):
 
         supervised_loss = reg_loss_propose + reg_loss_refine + cls_loss
 
-        # --- 新增自监督损失 ---
-        trajectory = data['agent']['trajectory']
-        mask = self.generate_random_mask(trajectory)
-
-        ssl_loss = self.self_supervised_task(trajectory, mask)
-        self.log('train_ssl_loss', ssl_loss, prog_bar=True, batch_size=1)
-
-        # 最终的总损失（加入自监督损失）
-        total_loss = supervised_loss + self.ssl_weight * ssl_loss
+        # --- 意图识别损失 ---
+        # 使用智能体特征进行意图识别
+        agent_features = scene_enc['x_a']  # [num_agents, seq_len, hidden_dim]
+        historical_traj = data['agent']['position'][:, :self.num_historical_steps]  # [num_agents, hist_steps, 2]
+        
+        intent_result = self.intent_recognition(
+            agent_features=agent_features,
+            historical_trajectories=historical_traj
+        )
+        
+        # 意图分类损失
+        intent_loss = intent_result['intent_loss']
+        
+        # 意图-轨迹一致性损失
+        # 构造预测轨迹用于一致性检查
+        pred_traj_for_consistency = torch.cat([
+            pred['loc_refine_pos'][..., :self.output_dim]
+        ], dim=-1)  # [batch_size, num_modes, seq_len, 2]
+        
+        consistency_loss = self.intent_recognition.compute_intent_consistency_loss(
+            intent_result['intent_probs'],
+            pred_traj_for_consistency
+        )
+        
+        # 总损失
+        total_loss = (supervised_loss + 
+                     self.intent_weight * intent_loss + 
+                     self.consistency_weight * consistency_loss)
 
         # 日志记录
         self.log('train_reg_loss_propose', reg_loss_propose, prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
         self.log('train_reg_loss_refine', reg_loss_refine, prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
         self.log('train_cls_loss', cls_loss, prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
+        self.log('train_intent_loss', intent_loss, prog_bar=True, on_step=True, on_epoch=True, batch_size=1)
+        self.log('train_consistency_loss', consistency_loss, prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
         self.log('train_total_loss', total_loss, prog_bar=True, batch_size=1)
 
         return total_loss
-
-
-    def generate_random_mask(self, trajectory, mask_ratio=0.15):
-        mask = torch.rand_like(trajectory[..., 0]) < mask_ratio
-        return mask.unsqueeze(-1).expand_as(trajectory)
-
 
     def validation_step(self,
                         data,
@@ -371,38 +385,77 @@ class QCNet(pl.LightningModule):
             raise ValueError('{} is not a valid dataset'.format(self.dataset))
 
     def configure_optimizers(self):
+        # 1) 按模块类型初步划分 decay / no_decay
         decay = set()
         no_decay = set()
-        whitelist_weight_modules = (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.MultiheadAttention, nn.LSTM,
-                                    nn.LSTMCell, nn.GRU, nn.GRUCell)
-        blacklist_weight_modules = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.LayerNorm, nn.Embedding)
+        whitelist_weight_modules = (
+            nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d,
+            nn.MultiheadAttention, nn.LSTM, nn.LSTMCell,
+            nn.GRU, nn.GRUCell
+        )
+        blacklist_weight_modules = (
+            nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d,
+            nn.LayerNorm, nn.Embedding
+        )
         for module_name, module in self.named_modules():
-            for param_name, param in module.named_parameters():
-                full_param_name = '%s.%s' % (module_name, param_name) if module_name else param_name
-                if 'bias' in param_name:
+            for param_name, _ in module.named_parameters():
+                full_param_name = f"{module_name}.{param_name}" if module_name else param_name
+                if "bias" in param_name:
                     no_decay.add(full_param_name)
-                elif 'weight' in param_name:
+                elif "weight" in param_name:
                     if isinstance(module, whitelist_weight_modules):
                         decay.add(full_param_name)
                     elif isinstance(module, blacklist_weight_modules):
                         no_decay.add(full_param_name)
-                elif not ('weight' in param_name or 'bias' in param_name):
+                else:
                     no_decay.add(full_param_name)
-        param_dict = {param_name: param for param_name, param in self.named_parameters()}
-        inter_params = decay & no_decay
-        union_params = decay | no_decay
-        assert len(inter_params) == 0
-        assert len(param_dict.keys() - union_params) == 0
 
+        # 2) 收集所有模型实际参数
+        param_dict = {name: p for name, p in self.named_parameters()}
+
+        # 3) 过滤掉那些在 param_dict 中不存在的名称，避免 KeyError
+        orig_decay = decay.copy()
+        orig_no_decay = no_decay.copy()
+        decay = {n for n in orig_decay    if n in param_dict}
+        no_decay = {n for n in orig_no_decay if n in param_dict}
+        missing = (orig_decay | orig_no_decay) - (decay | no_decay)
+        if missing:
+            import logging
+            logging.warning(
+                "[configure_optimizers] these parameters were skipped:\n"
+                + "\n".join(sorted(missing))
+            )
+
+        # 4) Sanity checks: no overlap, no omissions
+        inter = decay & no_decay
+        assert not inter, f"Parameters in both decay/no_decay: {inter}"
+        all_grouped = decay | no_decay
+        missing_groups = set(param_dict.keys()) - all_grouped
+        assert not missing_groups, f"Parameters not assigned: {missing_groups}"
+
+        # 5) 构造 optimizer 参数组
         optim_groups = [
-            {"params": [param_dict[param_name] for param_name in sorted(list(decay))],
-             "weight_decay": self.weight_decay},
-            {"params": [param_dict[param_name] for param_name in sorted(list(no_decay))],
-             "weight_decay": 0.0},
+            {
+                "params": [param_dict[n] for n in sorted(decay)],
+                "weight_decay": self.weight_decay,
+            },
+            {
+                "params": [param_dict[n] for n in sorted(no_decay)],
+                "weight_decay": 0.0,
+            },
         ]
 
-        optimizer = torch.optim.AdamW(optim_groups, lr=self.lr, weight_decay=self.weight_decay)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=self.T_max, eta_min=0.0)
+        # 6) 创建 AdamW + CosineAnnealingLR
+        optimizer = torch.optim.AdamW(
+            optim_groups,
+            lr=self.lr,
+        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=optimizer,
+            T_max=self.T_max,
+            eta_min=0.0,
+        )
+
         return [optimizer], [scheduler]
 
     @staticmethod
@@ -437,3 +490,4 @@ class QCNet(pl.LightningModule):
         parser.add_argument('--submission_dir', type=str, default='./')
         parser.add_argument('--submission_file_name', type=str, default='submission')
         return parent_parser
+

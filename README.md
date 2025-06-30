@@ -19,7 +19,7 @@ This repository is the official implementation of the [CVPR 2023](https://cvpr20
 * [Training & Evaluation](#training--evaluation)
 * [Pretrained Models & Results](#pretrained-models--results)
 * [Citation](#citation)
-* [License](#license)
+
 
 ## News
 
@@ -130,6 +130,4 @@ Please also consider citing:
 }
 ```
 
-## License
 
-This repository is licensed under [Apache 2.0](LICENSE).
