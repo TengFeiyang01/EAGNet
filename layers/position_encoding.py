@@ -11,18 +11,30 @@ def compute_scene_complexity(agents_positions, obstacles_positions):
     :param obstacles_positions: 静态障碍物的位置，形状为 (num_obstacles, 2)
     :return: 计算得到的场景复杂度
     """
+    # 确保输入是torch tensor
+    if isinstance(agents_positions, np.ndarray):
+        agents_positions = torch.from_numpy(agents_positions)
+    if isinstance(obstacles_positions, np.ndarray):
+        obstacles_positions = torch.from_numpy(obstacles_positions)
+    
     # 计算智能体之间的平均距离
-    agent_distances = np.linalg.norm(agents_positions[:, None] - agents_positions, axis=-1)
-    non_zero_distances = agent_distances[agent_distances > 0]
-    avg_agent_distance = np.mean(non_zero_distances) if non_zero_distances.size > 0 else 0
+    agent_distances = torch.norm(agents_positions[:, None] - agents_positions, dim=-1)
+    non_zero_mask = agent_distances > 0
+    if non_zero_mask.any():
+        avg_agent_distance = torch.mean(agent_distances[non_zero_mask])
+    else:
+        avg_agent_distance = torch.tensor(0.0)
 
     # 计算障碍物与智能体的平均距离
-    obstacle_distances = np.linalg.norm(agents_positions[:, None] - obstacles_positions, axis=-1)
-    avg_obstacle_distance = np.mean(obstacle_distances) if obstacles_positions.size > 0 else 0
+    if obstacles_positions.size(0) > 0:
+        obstacle_distances = torch.norm(agents_positions[:, None] - obstacles_positions, dim=-1)
+        avg_obstacle_distance = torch.mean(obstacle_distances)
+    else:
+        avg_obstacle_distance = torch.tensor(0.0)
 
     # 简单的复杂度评估：智能体的密集程度 + 障碍物的密集程度
     complexity = avg_agent_distance + avg_obstacle_distance
-    return complexity
+    return complexity.item()  # 返回python标量
 
 
 class PositionEncoding(nn.Module):
@@ -51,10 +63,10 @@ class PositionEncoding(nn.Module):
         scene_complexity = compute_scene_complexity(agents_positions, obstacles_positions)
 
         # 根据场景复杂度动态调整 alpha
-        alpha = 1 / (1 + np.exp(-scene_complexity))  # 使用sigmoid来平滑调整值，保证alpha在0到1之间
+        alpha = 1 / (1 + torch.exp(torch.tensor(-scene_complexity)))  # 使用torch.exp来保持一致性
 
         # 计算位置编码
-        position_encoding = self.pe[:, :x.size(1)]  # 截取适当长度的编码
+        position_encoding = self.pe[:, :x.size(1)].to(x.device)  # 截取适当长度的编码并移到正确设备
 
         # 动态调整位置编码
         adjusted_position_encoding = position_encoding * alpha

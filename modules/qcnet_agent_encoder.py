@@ -1,5 +1,3 @@
-
-
 from typing import Dict, Mapping, Optional
 import torch
 import torch.nn as nn
@@ -11,72 +9,8 @@ from torch_geometric.utils import dense_to_sparse, subgraph
 from layers.attention_layer import AttentionLayer
 from layers.edge_attention_layer import EdgeAttentionLayer
 from layers.fourier_embedding import FourierEmbedding
+from layers.position_encoding import PositionEncoding
 from utils import angle_between_2d_vectors, weight_init, wrap_angle
-
-
-# 计算场景复杂度的函数
-def compute_scene_complexity(agents_positions, obstacles_positions):
-    """
-    计算场景复杂度。这里使用简单的距离度量来评估密集程度。
-    :param agents_positions: 当前智能体的位置，形状为 (num_agents, 2)
-    :param obstacles_positions: 静态障碍物的位置，形状为 (num_obstacles, 2)
-    :return: 计算得到的场景复杂度
-    """
-    # 确保输入是torch tensor
-    if isinstance(agents_positions, np.ndarray):
-        agents_positions = torch.from_numpy(agents_positions)
-    if isinstance(obstacles_positions, np.ndarray):
-        obstacles_positions = torch.from_numpy(obstacles_positions)
-    
-    # 计算智能体之间的平均距离
-    agent_distances = torch.norm(agents_positions[:, None] - agents_positions, dim=-1)
-    avg_agent_distance = torch.mean(agent_distances[agent_distances > 0])
-
-    # 计算障碍物与智能体的平均距离
-    obstacle_distances = torch.norm(agents_positions[:, None] - obstacles_positions, dim=-1)
-    avg_obstacle_distance = torch.mean(obstacle_distances)
-
-    # 简单的复杂度评估：智能体的密集程度 + 障碍物的密集程度
-    complexity = avg_agent_distance + avg_obstacle_distance
-    return complexity.item()  # 返回python标量
-
-
-# 定义位置编码类
-class PositionEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
-        super(PositionEncoding, self).__init__()
-        self.d_model = d_model
-        self.max_len = max_len
-        self.pe = torch.zeros(max_len, d_model)
-
-        # 初始化位置编码
-        position = torch.arange(0, max_len).float().unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * -(np.log(10000.0) / d_model))
-        self.pe[:, 0::2] = torch.sin(position * div_term)
-        self.pe[:, 1::2] = torch.cos(position * div_term)
-        self.pe = self.pe.unsqueeze(0)  # shape: (1, max_len, d_model)
-
-    def forward(self, x, agents_positions, obstacles_positions):
-        """
-        动态调整位置编码
-        :param x: 输入的序列数据
-        :param agents_positions: 智能体的位置
-        :param obstacles_positions: 障碍物的位置
-        :return: 动态调整后的位置编码
-        """
-        # 计算场景复杂度
-        scene_complexity = compute_scene_complexity(agents_positions, obstacles_positions)
-
-        # 根据场景复杂度动态调整 alpha
-        alpha = 1 / (1 + torch.exp(torch.tensor(-scene_complexity)))  # 使用torch.exp来保持一致性
-
-        # 计算位置编码
-        position_encoding = self.pe[:, :x.size(1)].to(x.device)  # 截取适当长度的编码并移到正确设备
-
-        # 动态调整位置编码
-        adjusted_position_encoding = position_encoding * alpha
-
-        return x + adjusted_position_encoding  # 将位置编码加到输入特征上
 
 
 class QCNetAgentEncoder(nn.Module):
@@ -133,9 +67,9 @@ class QCNetAgentEncoder(nn.Module):
         #     [AttentionLayer(hidden_dim=hidden_dim, num_heads=num_heads, head_dim=head_dim, dropout=dropout,
         #                     bipartite=False, has_pos_emb=True) for _ in range(num_layers)]
         # )
-        # 结合 EdgeAttentionLayer
+        # 结合 EdgeAttentionLayer - 使用优化后的高效版本
         self.a2a_attn_layers = nn.ModuleList(
-            [EdgeAttentionLayer(hidden_dim=hidden_dim, edge_dim=input_dim_r_a2a, num_heads=num_heads, dropout=dropout)
+            [EdgeAttentionLayer(hidden_dim=hidden_dim, edge_dim=hidden_dim, num_heads=num_heads, dropout=dropout)
              for _ in range(num_layers)]
         )
         self.apply(weight_init)
