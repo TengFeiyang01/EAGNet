@@ -5,11 +5,11 @@ import pytorch_lightning as pl
 from torch_geometric.loader import DataLoader
 
 from datasets import ArgoverseV2Dataset
-from predictors import QCNet
+from predictors import QCNext
 from transforms import TargetBuilder
 
 if __name__ == '__main__':
-    pl.seed_everything(2023, workers=True)
+    pl.seed_everything(2025, workers=True)
 
     parser = ArgumentParser()
     parser.add_argument('--model', type=str, required=True)
@@ -24,7 +24,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     model = {
-        'QCNet': QCNet,
+        'QCNext': QCNext,
     }[args.model].load_from_checkpoint(checkpoint_path=args.ckpt_path)
     val_dataset = {
         'argoverse_v2': ArgoverseV2Dataset,

@@ -5,14 +5,14 @@ import numpy as np
 import torch
 from pathlib import Path
 from datasets import ArgoverseV2Dataset
-from predictors import QCNet
+from predictors import QCNext
 from transforms import TargetBuilder
 import pandas as pd
 
-class AdvancedQCNetVisualizer:
+class AdvancedQCNextVisualizer:
     def __init__(self, model_path, data_root, device='cuda:0'):
         self.device = device
-        self.model = QCNet.load_from_checkpoint(model_path, map_location=device)
+        self.model = QCNext.load_from_checkpoint(model_path, map_location=device)
         self.model.eval()
         
         self.dataset = ArgoverseV2Dataset(
@@ -223,7 +223,7 @@ class AdvancedQCNetVisualizer:
         
         plt.show()
     
-    def create_video_visualization(self, output_path='qcnet_visualization.mp4', num_frames=20):
+    def create_video_visualization(self, output_path='qcnext_visualization.mp4', num_frames=20):
         """创建视频可视化"""
         from matplotlib.animation import FFMpegWriter
         
@@ -236,7 +236,7 @@ class AdvancedQCNetVisualizer:
                 self._visualize_single_scene(ax, scene_idx, scene_idx)
         
         # 创建动画
-        writer = FFMpegWriter(fps=2, metadata=dict(artist='QCNet'), bitrate=1800)
+        writer = FFMpegWriter(fps=2, metadata=dict(artist='QCNext'), bitrate=1800)
         
         with writer.saving(fig, output_path, 100):
             for frame in range(num_frames):
@@ -251,7 +251,7 @@ if __name__ == "__main__":
     data_root = "~/test_data/argoverse_v2/"
     
     if Path(model_path).exists():
-        visualizer = AdvancedQCNetVisualizer(model_path, data_root)
+        visualizer = AdvancedQCNextVisualizer(model_path, data_root)
         
         # 创建多场景可视化（类似你的图片）
         visualizer.create_multi_scene_visualization(

@@ -1,6 +1,7 @@
 
 from losses.focal_loss import FocalLoss
 from losses.gaussian_nll_loss import GaussianNLLLoss
+from losses.joint_nll_loss import JointNLLLoss, JointMixtureNLLLoss, compute_joint_displacement_error
 from losses.laplace_nll_loss import LaplaceNLLLoss
 from losses.mixture_nll_loss import MixtureNLLLoss
 from losses.mixture_of_gaussian_nll_loss import MixtureOfGaussianNLLLoss

@@ -1,4 +1,3 @@
-
 from argparse import ArgumentParser
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor
@@ -6,10 +5,10 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.strategies import DDPStrategy
 
 from datamodules import ArgoverseV2DataModule
-from predictors import QCNet
+from predictors.qcnext import QCNext
 
 if __name__ == '__main__':
-    pl.seed_everything(2023, workers=True)
+    pl.seed_everything(2025, workers=True)
 
     parser = ArgumentParser()
     parser.add_argument('--root', type=str, required=True)
@@ -29,14 +28,12 @@ if __name__ == '__main__':
     parser.add_argument('--accelerator', type=str, default='auto')
     parser.add_argument('--devices', type=int, required=True)
     parser.add_argument('--max_epochs', type=int, default=64)
-    parser.add_argument('--intent_weight', type=float, default=0.1)
     parser.add_argument('--consistency_weight', type=float, default=0.05)
 
-
-    QCNet.add_model_specific_args(parser)
+    QCNext.add_model_specific_args(parser)
     args = parser.parse_args()
 
-    model = QCNet(**vars(args))
+    model = QCNext(**vars(args))
     datamodule = {
         'argoverse_v2': ArgoverseV2DataModule,
     }[args.dataset](**vars(args))
@@ -45,4 +42,4 @@ if __name__ == '__main__':
     trainer = pl.Trainer(accelerator=args.accelerator, devices=args.devices,
                          strategy=DDPStrategy(find_unused_parameters=True, gradient_as_bucket_view=True),
                          callbacks=[model_checkpoint, lr_monitor], max_epochs=args.max_epochs)
-    trainer.fit(model, datamodule)
+    trainer.fit(model, datamodule) 

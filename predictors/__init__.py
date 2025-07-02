@@ -1,2 +1,2 @@
 
-from predictors.qcnet import QCNet
+from predictors.qcnext import QCNext
